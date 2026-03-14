@@ -5,14 +5,13 @@ const crypto = require("crypto");
 const authMiddleware = require("../middleware/auth");
 const telegramService = require("../services/telegramService");
 
-// POST /api/telegram/generate-code - Generate verification code
+// POST /api/telegram/generate-code
 router.post("/generate-code", authMiddleware, async (req, res) => {
   const user = req.user;
   console.log(`\n[Telegram/GenerateCode] User: ${user.email}`);
 
-  // Generate 6-char alphanumeric code
   const code = crypto.randomBytes(3).toString("hex").toUpperCase();
-  const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+  const expiry = new Date(Date.now() + 10 * 60 * 1000);
 
   user.telegramVerifyCode = code;
   user.telegramVerifyExpiry = expiry;
@@ -21,22 +20,13 @@ router.post("/generate-code", authMiddleware, async (req, res) => {
   const botUsername = process.env.TELEGRAM_BOT_USERNAME || "ReminderFlowBot";
   const deepLink = `https://t.me/${botUsername}?start=${code}`;
 
-  console.log(`[Telegram/GenerateCode] Code=${code}, Expiry=${expiry}`);
-
-  res.json({
-    success: true,
-    code,
-    deepLink,
-    botUsername,
-    expiresAt: expiry,
-  });
+  console.log(`[Telegram/GenerateCode] Code=${code}`);
+  res.json({ success: true, code, deepLink, botUsername, expiresAt: expiry });
 });
 
-// GET /api/telegram/status - Check connection status
+// GET /api/telegram/status
 router.get("/status", authMiddleware, async (req, res) => {
   const user = req.user;
-  console.log(`[Telegram/Status] User: ${user.email}, Connected: ${user.isTelegramConnected}`);
-
   res.json({
     success: true,
     isConnected: user.isTelegramConnected,
@@ -45,49 +35,36 @@ router.get("/status", authMiddleware, async (req, res) => {
   });
 });
 
-// DELETE /api/telegram/disconnect - Disconnect telegram
+// DELETE /api/telegram/disconnect
 router.delete("/disconnect", authMiddleware, async (req, res) => {
   const user = req.user;
-  console.log(`[Telegram/Disconnect] User: ${user.email}`);
-
   user.telegramChatId = null;
   user.telegramUsername = null;
   user.telegramConnectedAt = null;
   await user.save();
-
+  console.log(`[Telegram/Disconnect] User: ${user.email}`);
   res.json({ success: true, message: "Telegram disconnected" });
 });
 
-// POST /api/telegram/webhook - Receive messages from Telegram (production)
+// POST /api/telegram/webhook — called by Telegram for every message
+// This is the SINGLE entry point for all incoming messages in production.
+// The bot is initialized WITHOUT { webHook: true } so its internal listener
+// is NOT running — this route is the only place messages are processed.
 router.post("/webhook", express.json(), async (req, res) => {
-  console.log(`[Telegram/Webhook] Received:`, JSON.stringify(req.body).substring(0, 200));
-
-  const bot = telegramService.getBot();
-  if (bot) {
-    try {
-      await telegramService.handleIncomingMessage(req.body.message || req.body.edited_message);
-    } catch (err) {
-      console.error("[Telegram/Webhook] Error:", err);
-    }
-  }
-
-  // Always respond 200 to Telegram quickly
+  // Respond to Telegram immediately (must be within 5s or they retry)
   res.status(200).json({ ok: true });
-});
 
-// POST /api/telegram/set-webhook - Set webhook URL (for deployment)
-router.post("/set-webhook", authMiddleware, async (req, res) => {
-  const bot = telegramService.getBot();
-  if (!bot) return res.status(503).json({ success: false, message: "Bot not initialized" });
+  // Process the update asynchronously after responding
+  const update = req.body;
+  console.log(`[Telegram/Webhook] Update type: ${update.message ? "message" : update.edited_message ? "edited" : "other"}`);
 
-  const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL;
+  const msg = update.message || update.edited_message;
+  if (!msg) return; // ignore non-message updates (inline queries etc.)
+
   try {
-    await bot.setWebHook(webhookUrl);
-    console.log(`[Telegram/SetWebhook] Set to: ${webhookUrl}`);
-    res.json({ success: true, webhookUrl });
+    await telegramService.handleIncomingMessage(msg);
   } catch (err) {
-    console.error("[Telegram/SetWebhook] Error:", err);
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[Telegram/Webhook] Error processing message:", err.message);
   }
 });
 
